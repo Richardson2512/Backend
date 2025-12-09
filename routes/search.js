@@ -1,0 +1,622 @@
+const express = require('express');
+const ScrapeCreatorsService = require('../services/scrapeCreatorsService');
+const AIService = require('../services/aiService');
+const { validateSearchRequest } = require('../middleware/validation');
+const logger = require('../utils/logger');
+
+const router = express.Router();
+
+// New endpoint: Generate query expansion options
+router.post('/expand-query', async (req, res) => {
+  try {
+    const { query } = req.body;
+    
+    if (!query || typeof query !== 'string' || query.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Query is required and must be a non-empty string'
+      });
+    }
+
+    logger.info(`🔍 Generating query expansion for: "${query}"`);
+    
+    const subtopics = await AIService.generateQueryExpansion(query.trim());
+    
+    res.json({
+      success: true,
+      data: {
+        originalQuery: query.trim(),
+        subtopics: subtopics
+      }
+    });
+
+  } catch (error) {
+    logger.error('Query expansion error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate query expansion options',
+      error: error.message
+    });
+  }
+});
+
+// New endpoint: Perform focused search with specific subtopic and category
+router.post('/focused-search', async (req, res) => {
+  const requestStartTime = Date.now();
+  const MAX_REQUEST_TIME = 120000; // 2 minutes max request time
+  
+  try {
+    const { 
+      originalQuery, 
+      expandedQuery, 
+      selectedCategory, 
+      platforms = ['reddit', 'x', 'youtube', 'linkedin', 'threads'],
+      timeFilter = 'week',
+      language = 'en'
+    } = req.body;
+
+    // Validation
+    if (!originalQuery || !expandedQuery || !selectedCategory) {
+      return res.status(400).json({
+        success: false,
+        message: 'originalQuery, expandedQuery, and selectedCategory are required'
+      });
+    }
+
+    const validCategories = ['pain-points', 'trending-ideas', 'content-ideas'];
+    if (!validCategories.includes(selectedCategory)) {
+      return res.status(400).json({
+        success: false,
+        message: `selectedCategory must be one of: ${validCategories.join(', ')}`
+      });
+    }
+
+    logger.info(`🎯 Focused search: "${expandedQuery}" in category: ${selectedCategory}`);
+
+    const startTime = Date.now();
+
+    // Step 1: Collect posts from all platforms using ScrapeCreators API (with timeout)
+    logger.info(`📡 Step 1: Collecting posts from platforms: ${platforms.join(', ')}`);
+    let allPosts;
+    try {
+      const scrapePromise = ScrapeCreatorsService.searchPosts(
+        expandedQuery,
+        platforms,
+        language,
+        timeFilter,
+        50
+      );
+      
+      // Add timeout to scraping (30 seconds)
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('ScrapeCreators API timeout after 30 seconds')), 30000)
+      );
+      
+      allPosts = await Promise.race([scrapePromise, timeoutPromise]);
+    } catch (scrapeError) {
+      logger.error('❌ Error collecting posts:', scrapeError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to collect posts from social media platforms',
+        error: scrapeError.message
+      });
+    }
+
+    logger.info(`📊 Step 1 Complete: Collected ${allPosts.length} posts from ${platforms.join(', ')}`);
+
+    if (allPosts.length === 0) {
+      const duration = Date.now() - startTime;
+      return res.json({
+        success: true,
+        data: {
+          results: [],
+          metadata: {
+            duration: duration,
+            totalPosts: 0,
+            relevantPosts: 0,
+            category: selectedCategory,
+            expandedQuery: expandedQuery,
+            originalQuery: originalQuery,
+            platforms: platforms
+          }
+        }
+      });
+    }
+
+    // Step 2: Perform focused AI analysis (with timeout protection)
+    logger.info(`🤖 Step 2: Starting AI analysis with ${allPosts.length} posts`);
+    let analysisResult;
+    try {
+      const analysisPromise = AIService.performFocusedAnalysis(allPosts, expandedQuery, selectedCategory);
+      
+      // Add timeout to AI analysis (90 seconds)
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('AI analysis timeout after 90 seconds')), 90000)
+      );
+      
+      analysisResult = await Promise.race([analysisPromise, timeoutPromise]);
+    } catch (aiError) {
+      logger.error('❌ AI analysis error:', aiError);
+      
+      // Return partial results if we have posts but AI failed
+      return res.status(500).json({
+        success: false,
+        message: 'AI analysis failed. This might be due to model loading issues or timeout.',
+        error: aiError.message,
+        suggestion: 'Please try again in a few moments or contact support if the issue persists.'
+      });
+    }
+    
+    // Check if no relevant content was found
+    if (analysisResult.metadata && analysisResult.metadata.noRelevantContent) {
+      const duration = Date.now() - startTime;
+      
+      res.json({
+        success: true,
+        data: {
+          results: [],
+          metadata: {
+            ...analysisResult.metadata,
+            duration: duration,
+            originalQuery: originalQuery,
+            platforms: platforms
+          }
+        }
+      });
+      return;
+    }
+    
+    // Apply tier-based limits (same as regular search)
+    const userTier = req.body.userTier || 'free';
+    const tierLimits = {
+      free: { perPlatform: 1, totalPerCategory: 3, isFree: true }, // Free users get 3 total results combined
+      standard: { perPlatform: 3, totalPerCategory: 9 }, // Standard: 3 per platform
+      pro: { perPlatform: 5, totalPerCategory: 15 } // Pro: 5 per platform
+    };
+    const limits = tierLimits[userTier] || tierLimits.free;
+    
+    // Apply per-platform limits to the results
+    let finalResults = analysisResult.results || [];
+    if (finalResults && finalResults.length > 0) {
+      if (limits.isFree) {
+        // Free users: 3 total results with Reddit compensation
+        finalResults = applyFreeUserLimits(finalResults);
+      } else {
+        // Standard/Pro users: per-platform limits
+        finalResults = applyPerPlatformLimits(finalResults, limits.perPlatform);
+      }
+    }
+    
+    if (limits.isFree) {
+      logger.info(`📊 Applied ${userTier} tier limits: 3 total results with Reddit compensation, final count: ${finalResults.length}`);
+    } else {
+      logger.info(`📊 Applied ${userTier} tier limits: ${limits.perPlatform} per platform (max ${limits.totalPerCategory} total), final count: ${finalResults.length}`);
+    }
+    
+    const duration = Date.now() - startTime;
+    
+    res.json({
+      success: true,
+      data: {
+        results: finalResults,
+        metadata: {
+          ...analysisResult.metadata,
+          duration: duration,
+          originalQuery: originalQuery,
+          platforms: platforms
+        }
+      }
+    });
+
+  } catch (error) {
+    logger.error('Focused search error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Focused search failed',
+      error: error.message
+    });
+  }
+});
+
+// Helper function to generate intelligent no-results messages
+function generateNoResultsMessage(query, timeFilter, totalPosts) {
+  const timeMessages = {
+    'hour': 'No recent buzz in the past hour',
+    'day': 'No trending discussions in the past day',
+    'week': 'No recent buzz or trending discussions in the past week',
+    'month': 'No trending discussions in the past month',
+    '3months': 'No trending discussions in the past 3 months',
+    '6months': 'No trending discussions in the past 6 months',
+    'year': 'No trending discussions in the past year',
+    'all': 'No trending discussions found'
+  };
+
+  const suggestions = {
+    'hour': ['Try "Past Day" or "Past Week" for more results'],
+    'day': ['Try "Past Week" or "Past Month" for more results'],
+    'week': ['Try "Past Month" or "Past 3 Months" for more results'],
+    'month': ['Try "Past 3 Months" or "Past Year" for more results'],
+    '3months': ['Try "Past 6 Months" or "Past Year" for more results'],
+    '6months': ['Try "Past Year" or "All Time" for more results'],
+    'year': ['Try "All Time" for historical discussions'],
+    'all': ['Try different search terms or check if the topic exists']
+  };
+
+  const baseMessage = timeMessages[timeFilter] || 'No trending discussions found';
+  const timeContext = ` for "${query}"`;
+  const suggestionList = suggestions[timeFilter] || [];
+
+  return {
+    title: `${baseMessage}${timeContext}`,
+    message: `Found ${totalPosts} posts but none were relevant to your search. This might be because:`,
+    reasons: [
+      `The topic "${query}" hasn't been trending in the selected time period`,
+      'The posts found were about different topics',
+      'The search terms need to be more specific'
+    ],
+    suggestions: suggestionList,
+    tip: 'Try expanding your time range or using more specific search terms for better results.'
+  };
+}
+
+function generateNoPostsMessage(query, timeFilter, errors) {
+  const timeMessages = {
+    'hour': 'No discussions found in the past hour',
+    'day': 'No discussions found in the past day', 
+    'week': 'No discussions found in the past week',
+    'month': 'No discussions found in the past month',
+    '3months': 'No discussions found in the past 3 months',
+    '6months': 'No discussions found in the past 6 months',
+    'year': 'No discussions found in the past year',
+    'all': 'No discussions found'
+  };
+
+  const baseMessage = timeMessages[timeFilter] || 'No discussions found';
+  
+  // Check if it's due to API errors
+  const hasApiErrors = errors.length > 0;
+  
+  return {
+    title: `${baseMessage} for "${query}"`,
+    message: hasApiErrors 
+      ? 'No posts were retrieved due to API issues. This might be because:'
+      : `No discussions found about "${query}" in the selected time period. This might be because:`,
+    reasons: hasApiErrors 
+      ? [
+          'Temporary API rate limits or connectivity issues',
+          'Some social media platforms are currently unavailable',
+          'High traffic causing delays in data retrieval'
+        ]
+      : [
+          `"${query}" hasn't been discussed much recently`,
+          'The topic might be too niche or specific',
+          'Try different time ranges or search terms'
+        ],
+    suggestions: hasApiErrors 
+      ? ['Wait a few minutes and try again', 'Check back later when traffic is lower']
+      : ['Try a broader time range', 'Use different search terms', 'Check if the topic is trending'],
+    tip: hasApiErrors 
+      ? 'Our team monitors API status continuously. Please try again shortly.'
+      : 'Consider searching for related terms or expanding your time range for better results.'
+  };
+}
+
+// Debug endpoint to check service health
+router.get('/debug', async (req, res) => {
+  try {
+    const AIClient = require('../services/ai/aiClient');
+    const aiStatus = AIClient.getStatus();
+    
+    const services = {
+      scrapecreators: { 
+        configured: !!process.env.SCRAPECREATORS_API_KEY, 
+        status: process.env.SCRAPECREATORS_API_KEY ? 'ready' : 'not configured',
+        platforms: ['reddit', 'x', 'youtube', 'linkedin', 'threads']
+      },
+      ai: {
+        groq: {
+          configured: !!process.env.GROQ_API_KEY,
+          available: aiStatus.groq.available,
+          model: aiStatus.groq.model,
+          provider: 'Primary (Groq API)'
+        },
+        ollama: {
+          configured: !!process.env.OLLAMA_BASE_URL,
+          available: aiStatus.ollama.available,
+          model: aiStatus.ollama.model,
+          baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
+          provider: 'Backup (Self-hosted)'
+        }
+      }
+    };
+    
+    res.json({
+      success: true,
+      services,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Debug endpoint error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Test endpoint to check ScrapeCreators API
+router.get('/test-scrapecreators', async (req, res) => {
+  try {
+    const query = req.query.q || 'AI marketing';
+    const timeFilter = req.query.timeFilter || 'week';
+    const platforms = ['reddit', 'x', 'youtube', 'linkedin', 'threads'];
+    
+    logger.info(`🧪 Testing ScrapeCreators API for: "${query}"`);
+    
+    const posts = await ScrapeCreatorsService.searchPosts(query, platforms, 'en', timeFilter, 10);
+    
+    res.json({
+      success: true,
+      query,
+      timeFilter,
+      platforms,
+      postsCount: posts.length,
+      posts: posts.slice(0, 3), // Return first 3 for debugging
+      apiKeyConfigured: !!process.env.SCRAPECREATORS_API_KEY,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('ScrapeCreators test error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      stack: error.stack,
+      apiKeyConfigured: !!process.env.SCRAPECREATORS_API_KEY
+    });
+  }
+});
+
+// Main search endpoint
+router.post('/', validateSearchRequest, async (req, res) => {
+  try {
+    const { query, platforms, language, timeFilter } = req.body;
+    
+    logger.info(`🔍 Search request: "${query}" on platforms: [${platforms.join(', ')}] (language: ${language}, timeFilter: ${timeFilter})`);
+    
+    const startTime = Date.now();
+    
+    // Use ScrapeCreators API for all platforms
+    logger.info('🔍 Using ScrapeCreators API for post collection...');
+    const allPosts = await ScrapeCreatorsService.searchPosts(
+      query,
+      platforms,
+      language,
+      timeFilter,
+      50
+    );
+
+    // Process results
+    const errors = [];
+    const successfulPlatforms = platforms.filter(p => allPosts.some(post => post.platform === p));
+    
+    logger.info(`📦 Collected ${allPosts.length} posts from ${successfulPlatforms.length} platforms`);
+    
+    // Log platform breakdown
+    const platformCounts = {};
+    allPosts.forEach(post => {
+      platformCounts[post.platform] = (platformCounts[post.platform] || 0) + 1;
+    });
+    logger.info(`📊 Platform breakdown:`, platformCounts);
+
+    // If no posts found, return helpful error
+    if (allPosts.length === 0) {
+      logger.warn('⚠️ No posts found from ScrapeCreators API');
+      return res.status(503).json({
+        success: false,
+        error: 'Service temporarily unavailable',
+        message: 'All data sources are currently unavailable. This may be due to high traffic or API rate limits. Please try again in a few minutes.',
+        details: errors,
+        retryAfter: 60, // Suggest retry after 60 seconds
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Categorize posts using AI with enhanced relevance filtering
+    let categorizedResults = {
+      painPoints: [],
+      trendingIdeas: [],
+      contentIdeas: []
+    };
+
+    if (allPosts.length > 0) {
+      try {
+        logger.info(`🤖 Starting AI-powered categorization for ${allPosts.length} posts`);
+        categorizedResults = await AIService.categorizePosts(allPosts, query);
+        logger.info(`✅ AI categorization complete: ${categorizedResults.painPoints.length} pain points, ${categorizedResults.trendingIdeas.length} trending ideas, ${categorizedResults.contentIdeas.length} content ideas`);
+      } catch (error) {
+        logger.error('AI categorization failed:', error);
+        // Fallback to simple categorization
+        categorizedResults = AIService.simpleCategorization(allPosts);
+      }
+    }
+
+    // Apply tier-based result limiting per platform within each category
+    const userTier = req.body.userTier || 'free';
+    const tierLimits = {
+      free: { perPlatform: 1, totalPerCategory: 3, isFree: true }, // Free users get 3 total results combined
+      standard: { perPlatform: 3, totalPerCategory: 9 }, // Standard: 3 per platform × 3 platforms = 9 per category
+      pro: { perPlatform: 5, totalPerCategory: 15 } // Pro: 5 per platform × 3 platforms = 15 per category
+    };
+
+    const limits = tierLimits[userTier] || tierLimits.free;
+    
+    // Apply per-platform limits to each category
+    if (limits.isFree) {
+      // Free users: 3 total results with Reddit compensation per category
+      categorizedResults.painPoints = applyFreeUserLimits(categorizedResults.painPoints);
+      categorizedResults.trendingIdeas = applyFreeUserLimits(categorizedResults.trendingIdeas);
+      categorizedResults.contentIdeas = applyFreeUserLimits(categorizedResults.contentIdeas);
+    } else {
+      // Standard/Pro users: per-platform limits
+      categorizedResults.painPoints = applyPerPlatformLimits(categorizedResults.painPoints, limits.perPlatform);
+      categorizedResults.trendingIdeas = applyPerPlatformLimits(categorizedResults.trendingIdeas, limits.perPlatform);
+      categorizedResults.contentIdeas = applyPerPlatformLimits(categorizedResults.contentIdeas, limits.perPlatform);
+    }
+    
+    if (limits.isFree) {
+      logger.info(`📊 Applied ${userTier} tier limits: 3 total results with Reddit compensation per category`);
+    } else {
+      logger.info(`📊 Applied ${userTier} tier limits: ${limits.perPlatform} per platform (${limits.totalPerCategory} total per category)`);
+    }
+
+    const duration = Date.now() - startTime;
+    const totalPosts = allPosts.length;
+    const totalResults = (categorizedResults.painPoints?.length || 0) + 
+                        (categorizedResults.trendingIdeas?.length || 0) + 
+                        (categorizedResults.contentIdeas?.length || 0);
+    
+    logger.info(`🎉 Search completed: ${totalPosts} total posts, ${totalResults} categorized results in ${duration}ms`);
+
+    // Generate intelligent no-results message if needed
+    let noResultsMessage = null;
+    if (totalResults === 0 && totalPosts > 0) {
+      noResultsMessage = generateNoResultsMessage(query, timeFilter, totalPosts);
+    } else if (totalResults === 0 && totalPosts === 0) {
+      noResultsMessage = generateNoPostsMessage(query, timeFilter, errors);
+    }
+
+    // Response with relevance analysis and intelligent messaging
+    res.json({
+      success: true,
+      data: categorizedResults,
+      metadata: {
+        query,
+        platforms,
+        timeFilter,
+        totalPosts,
+        totalResults,
+        duration,
+        errors: errors.length > 0 ? errors : undefined,
+        relevanceAnalysis: categorizedResults.relevanceAnalysis,
+        noResultsMessage,
+        timestamp: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    logger.error('Search endpoint error:', error);
+    
+    res.status(500).json({
+      success: false,
+      error: 'Search failed',
+      message: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Health check for search service
+router.get('/health', (req, res) => {
+  res.json({
+    status: 'OK',
+    service: 'search',
+    timestamp: new Date().toISOString(),
+    availablePlatforms: ['reddit', 'x', 'youtube']
+  });
+});
+
+// Get search statistics
+router.get('/stats', async (req, res) => {
+  try {
+    // This could be expanded to include actual statistics from a database
+    res.json({
+      totalSearches: 0, // Would come from database
+      popularQueries: [], // Would come from database
+      platformStats: {
+        reddit: { available: true, lastChecked: new Date().toISOString() },
+        scrapecreators: { available: !!process.env.SCRAPECREATORS_API_KEY, lastChecked: new Date().toISOString() },
+        youtube: { available: false, lastChecked: new Date().toISOString() }
+      }
+    });
+  } catch (error) {
+    logger.error('Stats endpoint error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch statistics'
+    });
+  }
+});
+
+// Helper function to apply per-platform limits to posts
+function applyPerPlatformLimits(posts, limitPerPlatform) {
+  const platforms = ['reddit', 'x', 'youtube', 'linkedin', 'threads'];
+  const filtered = [];
+  const usedPosts = new Set();
+
+  // First pass: Get N posts from each platform if available
+  platforms.forEach(platform => {
+    const platformPosts = posts.filter(post => post.platform === platform && !usedPosts.has(post.id));
+    const toTake = Math.min(platformPosts.length, limitPerPlatform);
+    
+    const selectedPosts = platformPosts.slice(0, toTake);
+    selectedPosts.forEach(post => usedPosts.add(post.id));
+    filtered.push(...selectedPosts);
+  });
+
+  // Second pass: Fill remaining slots with any available posts (cross-platform)
+  const remainingSlots = (limitPerPlatform * 3) - filtered.length;
+  if (remainingSlots > 0) {
+    const remainingPosts = posts.filter(post => !usedPosts.has(post.id));
+    const toAdd = Math.min(remainingPosts.length, remainingSlots);
+    filtered.push(...remainingPosts.slice(0, toAdd));
+  }
+
+  return filtered;
+}
+
+// Helper function for free users: 3 total results with Reddit compensation
+function applyFreeUserLimits(posts) {
+  if (!posts || posts.length === 0) return [];
+  
+  const platforms = ['reddit', 'x', 'youtube', 'linkedin', 'threads'];
+  const filtered = [];
+  const usedPosts = new Set();
+  
+  // First pass: Try to get 1 result from each platform
+  platforms.forEach(platform => {
+    const platformPosts = posts.filter(post => post.platform === platform && !usedPosts.has(post.id));
+    if (platformPosts.length > 0) {
+      const selectedPost = platformPosts[0];
+      usedPosts.add(selectedPost.id);
+      filtered.push(selectedPost);
+    }
+  });
+  
+  // Second pass: If we don't have 3 results, compensate with Reddit posts
+  const remainingSlots = 3 - filtered.length;
+  if (remainingSlots > 0) {
+    const redditPosts = posts.filter(post => 
+      post.platform === 'reddit' && !usedPosts.has(post.id)
+    );
+    const toAdd = Math.min(redditPosts.length, remainingSlots);
+    redditPosts.slice(0, toAdd).forEach(post => {
+      usedPosts.add(post.id);
+      filtered.push(post);
+    });
+  }
+  
+  // Third pass: If still not 3 results, fill with any remaining posts
+  const finalRemainingSlots = 3 - filtered.length;
+  if (finalRemainingSlots > 0) {
+    const remainingPosts = posts.filter(post => !usedPosts.has(post.id));
+    const toAdd = Math.min(remainingPosts.length, finalRemainingSlots);
+    remainingPosts.slice(0, toAdd).forEach(post => {
+      usedPosts.add(post.id);
+      filtered.push(post);
+    });
+  }
+  
+  return filtered;
+}
+
+module.exports = router;
