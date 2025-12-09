@@ -6,11 +6,22 @@ const { createClient } = require('@supabase/supabase-js');
 
 const router = express.Router();
 
-// Initialize Supabase Admin client
-const supabaseAdmin = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+// Initialize Supabase Admin client (with conditional initialization)
+let supabaseAdmin = null;
+try {
+  if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    supabaseAdmin = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_ROLE_KEY
+    );
+    logger.info('✅ Supabase Admin client initialized for payments API');
+  } else {
+    logger.warn('⚠️ Supabase credentials not configured - payments API disabled');
+  }
+} catch (error) {
+  logger.error('❌ Failed to initialize Supabase Admin client:', error);
+  supabaseAdmin = null;
+}
 
 // Initialize Dodo Payments client
 const dodoClient = new DodoPayments.default({
@@ -436,6 +447,13 @@ async function handleSubscriptionActivated(payload, subscriptionData, res) {
       metadata: JSON.stringify(metadata)
     });
     
+    // Check if Supabase is available
+    if (!supabaseAdmin) {
+      logger.warn('⚠️ Supabase Admin client not initialized, skipping database update');
+      res.json({ success: true, message: 'Webhook processed but database not configured' });
+      return;
+    }
+
     // Check if we have user_id in metadata (preferred method)
     if (userId) {
       logger.info('✅ Found user_id in metadata, activating subscription for user', { userId, tier });
@@ -533,6 +551,13 @@ async function handleSubscriptionRenewed(payload, subscriptionData, res) {
       eventType
     });
     
+    // Check if Supabase is available
+    if (!supabaseAdmin) {
+      logger.warn('⚠️ Supabase Admin client not initialized, skipping database update');
+      res.json({ success: true, message: 'Webhook processed but database not configured' });
+      return;
+    }
+    
     // Check if we have user_id in metadata
     if (userId) {
       logger.info('✅ Found user_id in metadata, renewing subscription for user', { userId, tier });
@@ -615,6 +640,13 @@ async function handlePaymentSuccess(payload, paymentData, res) {
       paymentId: paymentData?.payment_id || payload.data?.payment_id
     });
     
+    // Check if Supabase is available
+    if (!supabaseAdmin) {
+      logger.warn('⚠️ Supabase Admin client not initialized, skipping database update');
+      res.json({ success: true, message: 'Webhook processed but database not configured' });
+      return;
+    }
+    
     // If we have user_id in metadata, upgrade the user
     if (userId) {
       logger.info(`✅ Found user_id in metadata, upgrading user to ${tier.toUpperCase()}`, { userId });
@@ -696,6 +728,12 @@ async function handleSubscriptionCancellation(payload, subscriptionData, res) {
   const metadata = subscriptionData?.metadata || payload.data?.metadata || {};
   const userId = metadata.user_id;
   
+  if (!supabaseAdmin) {
+    logger.warn('⚠️ Supabase Admin client not initialized, skipping database update');
+    res.json({ success: true, message: 'Webhook processed but database not configured' });
+    return;
+  }
+  
   if (userId) {
     await supabaseAdmin
       .from('users')
@@ -716,6 +754,12 @@ async function handleSubscriptionHold(payload, subscriptionData, res) {
   const eventType = payload.type;
   const metadata = subscriptionData?.metadata || payload.data?.metadata || {};
   const userId = metadata.user_id;
+  
+  if (!supabaseAdmin) {
+    logger.warn('⚠️ Supabase Admin client not initialized, skipping database update');
+    res.json({ success: true, message: 'Webhook processed but database not configured' });
+    return;
+  }
   
   if (userId) {
     await supabaseAdmin
@@ -739,6 +783,12 @@ async function handleTrialEvent(payload, subscriptionData, res) {
   const userId = metadata.user_id;
   const planId = metadata.plan_id || 'standard';
   const tier = planId === 'pro' ? 'pro' : 'standard';
+  
+  if (!supabaseAdmin) {
+    logger.warn('⚠️ Supabase Admin client not initialized, skipping database update');
+    res.json({ success: true, message: 'Webhook processed but database not configured' });
+    return;
+  }
   
   if (userId) {
     if (eventType === 'subscription.trial_started') {
