@@ -8,27 +8,40 @@ const searchSchema = Joi.object({
     'string.max': 'Search query must be less than 500 characters'
   }),
   platforms: Joi.array().items(
-    Joi.string().valid('reddit', 'x', 'youtube', 'linkedin', 'threads')
+    Joi.string().valid(
+      'reddit', 'x', 'youtube', 'linkedin', 'threads',
+      'tiktok', 'instagram', 'pinterest', 'google'
+    )
   ).min(1).required().messages({
     'array.min': 'At least one platform must be selected',
-    'any.only': 'Platform must be one of: reddit, x, youtube, linkedin, threads'
+    'any.only': 'Invalid platform selected'
   }),
   language: Joi.string().length(2).default('en').messages({
     'string.length': 'Language must be a 2-character code (e.g., en, es, fr)'
   }),
   timeFilter: Joi.string().valid('hour', 'day', 'week', 'month', '3months', '6months', 'year', 'all').default('week').messages({
     'any.only': 'Time filter must be one of: hour, day, week, month, 3months, 6months, year, all'
-  })
+  }),
+  userTier: Joi.string().valid('free', 'standard', 'pro').default('free')
 });
 
-// Reddit search validation schema
+// Ad Search validation schema
+const adSearchSchema = Joi.object({
+  query: Joi.string().min(1).max(500).required(),
+  platforms: Joi.array().items(
+    Joi.string().valid('facebook', 'linkedin', 'google', 'reddit', 'tiktok_shop')
+  ).min(1).required(),
+  userTier: Joi.string().valid('free', 'standard', 'pro').default('free')
+});
+
+// Reddit search validation schema (legacy support if needed)
 const redditSearchSchema = Joi.object({
   query: Joi.string().min(1).max(500).required(),
   language: Joi.string().length(2).default('en'),
   timeFilter: Joi.string().valid('hour', 'day', 'week', 'month', '3months', '6months', 'year', 'all').default('week')
 });
 
-// X search validation schema
+// X search validation schema (legacy support if needed)
 const xSearchSchema = Joi.object({
   query: Joi.string().min(1).max(500).required(),
   language: Joi.string().length(2).default('en'),
@@ -62,6 +75,7 @@ const validateRequest = (schema) => {
 
 module.exports = {
   validateSearchRequest: validateRequest(searchSchema),
+  validateAdSearchRequest: validateRequest(adSearchSchema),
   validateRedditSearchRequest: validateRequest(redditSearchSchema),
   validateXSearchRequest: validateRequest(xSearchSchema)
 };

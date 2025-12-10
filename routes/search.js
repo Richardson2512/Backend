@@ -1,7 +1,7 @@
 const express = require('express');
 const ScrapeCreatorsService = require('../services/scrapeCreatorsService');
 const AIService = require('../services/aiService');
-const { validateSearchRequest } = require('../middleware/validation');
+const { validateSearchRequest, validateAdSearchRequest } = require('../middleware/validation');
 const logger = require('../utils/logger');
 
 const router = express.Router();
@@ -214,6 +214,42 @@ router.post('/focused-search', async (req, res) => {
       success: false,
       message: 'Focused search failed',
       error: error.message
+    });
+  }
+});
+
+// NEW: Ad Search Endpoint
+router.post('/ads', validateAdSearchRequest, async (req, res) => {
+  try {
+    const { query, platforms } = req.body;
+    
+    logger.info(`🔍 Ad Search request: "${query}" on platforms: [${platforms.join(', ')}]`);
+    
+    const startTime = Date.now();
+    const ads = await ScrapeCreatorsService.searchAds(query, platforms);
+    const duration = Date.now() - startTime;
+    
+    logger.info(`✅ Ad Search completed: ${ads.length} ads found in ${duration}ms`);
+
+    res.json({
+      success: true,
+      data: {
+        ads: ads,
+        metadata: {
+          query,
+          platforms,
+          total: ads.length,
+          duration,
+          timestamp: new Date().toISOString()
+        }
+      }
+    });
+  } catch (error) {
+    logger.error('Ad Search endpoint error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Ad Search failed',
+      message: error.message
     });
   }
 });
@@ -521,7 +557,7 @@ router.get('/health', (req, res) => {
     status: 'OK',
     service: 'search',
     timestamp: new Date().toISOString(),
-    availablePlatforms: ['reddit', 'x', 'youtube']
+    availablePlatforms: ['reddit', 'x', 'youtube', 'linkedin', 'threads', 'tiktok', 'instagram', 'pinterest', 'google']
   });
 });
 
@@ -549,7 +585,7 @@ router.get('/stats', async (req, res) => {
 
 // Helper function to apply per-platform limits to posts
 function applyPerPlatformLimits(posts, limitPerPlatform) {
-  const platforms = ['reddit', 'x', 'youtube', 'linkedin', 'threads'];
+  const platforms = ['reddit', 'x', 'youtube', 'linkedin', 'threads', 'tiktok', 'instagram', 'pinterest', 'google'];
   const filtered = [];
   const usedPosts = new Set();
 
@@ -578,7 +614,7 @@ function applyPerPlatformLimits(posts, limitPerPlatform) {
 function applyFreeUserLimits(posts) {
   if (!posts || posts.length === 0) return [];
   
-  const platforms = ['reddit', 'x', 'youtube', 'linkedin', 'threads'];
+  const platforms = ['reddit', 'x', 'youtube', 'linkedin', 'threads', 'tiktok', 'instagram', 'pinterest', 'google'];
   const filtered = [];
   const usedPosts = new Set();
   
