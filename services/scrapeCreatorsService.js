@@ -3,12 +3,7 @@ const logger = require('../utils/logger');
 
 /**
  * ScrapeCreators API Service
- * Searches Reddit, YouTube, and Threads using ScrapeCreators API
- * 
- * API Format:
- * - GET requests with x-api-key header
- * - Platform-specific endpoints: /v1/{platform}/search
- * - Query param: ?query=...
+ * Searches multiple platforms using ScrapeCreators API
  */
 class ScrapeCreatorsService {
   static apiKey = process.env.SCRAPECREATORS_API_KEY;
@@ -16,20 +11,14 @@ class ScrapeCreatorsService {
   static timeout = 30000; // 30 seconds
 
   /**
-   * Search posts across all platforms using ScrapeCreators API
-   * @param {string} query - Search query
-   * @param {string[]} platforms - Array of platforms: 'reddit', 'youtube', 'threads'
-   * @param {string} language - Language code (e.g., 'en')
-   * @param {string} timeFilter - Time filter (hour, day, week, month, year)
-   * @param {number} maxResults - Maximum number of results per platform
-   * @returns {Promise<Array>} Array of formatted posts with platform field
+   * Search posts across all platforms
    */
-  static async searchPosts(query, platforms = ['reddit', 'youtube', 'threads'], language = 'en', timeFilter = 'week', maxResults = 50) {
+  static async searchPosts(query, platforms = ['reddit', 'youtube', 'tiktok', 'instagram', 'pinterest'], language = 'en', timeFilter = 'week', maxResults = 50) {
     const startTime = Date.now();
     logger.info(`🔍 ScrapeCreators search for: "${query}" on platforms: ${platforms.join(', ')}`);
 
     if (!this.apiKey) {
-      logger.error('❌ ScrapeCreators API key not configured! Please set SCRAPECREATORS_API_KEY environment variable.');
+      logger.error('❌ ScrapeCreators API key not configured!');
       throw new Error('ScrapeCreators API key not configured');
     }
 
@@ -40,11 +29,7 @@ class ScrapeCreatorsService {
       const platformPromises = platforms.map(async (platform) => {
         try {
           const posts = await this.searchPlatform(platform, query, maxResults);
-          // Add platform identifier to each post
-          return posts.map(post => ({
-            ...post,
-            platform: platform
-          }));
+          return posts.map(post => ({ ...post, platform }));
         } catch (error) {
           logger.error(`❌ Error searching ${platform}:`, error.message);
           return [];
@@ -57,7 +42,6 @@ class ScrapeCreatorsService {
       const duration = Date.now() - startTime;
       logger.info(`✅ ScrapeCreators search completed: ${allPosts.length} posts in ${duration}ms`);
 
-      // Sort by engagement
       return allPosts.sort((a, b) => (b.engagement || 0) - (a.engagement || 0));
 
     } catch (error) {
@@ -67,12 +51,48 @@ class ScrapeCreatorsService {
   }
 
   /**
+   * Search Ads across platforms
+   */
+  static async searchAds(query, platforms = ['facebook', 'linkedin', 'google'], maxResults = 20) {
+    const startTime = Date.now();
+    logger.info(`🔍 Searching Ads for: "${query}" on: ${platforms.join(', ')}`);
+
+    const allAds = [];
+    const headers = { 'x-api-key': this.apiKey };
+
+    const adPromises = platforms.map(async (platform) => {
+      try {
+        let ads = [];
+        switch (platform) {
+          case 'facebook':
+            ads = await this.searchFacebookAds(query, maxResults, headers);
+            break;
+          case 'linkedin':
+            ads = await this.searchLinkedInAds(query, maxResults, headers);
+            break;
+          case 'google':
+            ads = await this.searchGoogleAds(query, maxResults, headers);
+            break;
+        }
+        return ads.map(ad => ({ ...ad, platform, type: 'ad' }));
+      } catch (error) {
+        logger.error(`❌ Error searching ${platform} ads:`, error.message);
+        return [];
+      }
+    });
+
+    const results = await Promise.all(adPromises);
+    results.forEach(ads => allAds.push(...ads));
+
+    logger.info(`✅ Ads search completed: ${allAds.length} ads found`);
+    return allAds;
+  }
+
+  /**
    * Search a specific platform
    */
   static async searchPlatform(platform, query, maxResults) {
-    const headers = {
-      'x-api-key': this.apiKey
-    };
+    const headers = { 'x-api-key': this.apiKey };
 
     switch (platform.toLowerCase()) {
       case 'reddit':
@@ -81,255 +101,219 @@ class ScrapeCreatorsService {
         return this.searchYouTube(query, maxResults, headers);
       case 'threads':
         return this.searchThreads(query, maxResults, headers);
-      case 'x':
-      case 'twitter':
-        // Twitter/X search not available in ScrapeCreators API
-        // Only user-tweets and tweet details endpoints exist
-        logger.warn('⚠️ Twitter/X search endpoint not available in ScrapeCreators API - skipping');
-        return [];
-      case 'linkedin':
-        // LinkedIn search not available in ScrapeCreators API
-        // Only post, profile, and company endpoints exist
-        logger.warn('⚠️ LinkedIn search endpoint not available in ScrapeCreators API - skipping');
-        return [];
+      case 'tiktok':
+        return this.searchTikTok(query, maxResults, headers);
+      case 'instagram':
+        return this.searchInstagram(query, maxResults, headers);
+      case 'pinterest':
+        return this.searchPinterest(query, maxResults, headers);
+      case 'google':
+        return this.searchGoogle(query, maxResults, headers);
       default:
         logger.warn(`⚠️ Unknown platform: ${platform}`);
         return [];
     }
   }
 
-  /**
-   * Search Reddit using ScrapeCreators API
-   * Endpoint: GET /v1/reddit/search?query=...
-   */
+  // --- Content Search Methods ---
+
   static async searchReddit(query, maxResults, headers) {
     try {
-      logger.debug(`📡 Searching Reddit for: "${query}"`);
-
       const response = await axios.get(`${this.baseUrl}/reddit/search`, {
         headers,
-        params: {
-          query: query,
-          limit: maxResults
-        },
+        params: { query, limit: maxResults },
         timeout: this.timeout
       });
-
-      logger.debug('Reddit API response:', JSON.stringify(response.data).substring(0, 500));
-
-      // Handle various response formats
-      const posts = this.extractPostsFromResponse(response.data, 'reddit');
-      
-      if (!Array.isArray(posts) || posts.length === 0) {
-        logger.warn('No posts found from Reddit');
-        return [];
-      }
-
-      const formatted = posts.map(post => this.formatRedditPost(post));
-      logger.info(`✅ Found ${formatted.length} posts from Reddit`);
-      return formatted;
-
+      const posts = this.extractPosts(response.data);
+      return posts.map(p => this.formatPost(p, 'reddit'));
     } catch (error) {
       this.logApiError('Reddit', error);
       return [];
     }
   }
 
-  /**
-   * Search YouTube using ScrapeCreators API
-   * Endpoint: GET /v1/youtube/search?query=...
-   */
   static async searchYouTube(query, maxResults, headers) {
     try {
-      logger.debug(`📡 Searching YouTube for: "${query}"`);
-
       const response = await axios.get(`${this.baseUrl}/youtube/search`, {
         headers,
-        params: {
-          query: query,
-          limit: maxResults
-        },
+        params: { query, limit: maxResults },
         timeout: this.timeout
       });
-
-      logger.debug('YouTube API response:', JSON.stringify(response.data).substring(0, 500));
-
-      // Handle various response formats
-      const videos = this.extractPostsFromResponse(response.data, 'youtube');
-      
-      if (!Array.isArray(videos) || videos.length === 0) {
-        logger.warn('No videos found from YouTube');
-        return [];
-      }
-
-      const formatted = videos.map(video => this.formatYouTubePost(video));
-      logger.info(`✅ Found ${formatted.length} videos from YouTube`);
-      return formatted;
-
+      const videos = this.extractPosts(response.data);
+      return videos.map(v => this.formatPost(v, 'youtube'));
     } catch (error) {
       this.logApiError('YouTube', error);
       return [];
     }
   }
 
-  /**
-   * Search Threads using ScrapeCreators API
-   * Endpoint: GET /v1/threads/search?query=...
-   */
   static async searchThreads(query, maxResults, headers) {
     try {
-      logger.debug(`📡 Searching Threads for: "${query}"`);
-
       const response = await axios.get(`${this.baseUrl}/threads/search`, {
         headers,
-        params: {
-          query: query,
-          limit: maxResults
-        },
+        params: { query, limit: maxResults },
         timeout: this.timeout
       });
-
-      logger.debug('Threads API response:', JSON.stringify(response.data).substring(0, 500));
-
-      // Handle various response formats
-      const posts = this.extractPostsFromResponse(response.data, 'threads');
-      
-      if (!Array.isArray(posts) || posts.length === 0) {
-        logger.warn('No posts found from Threads');
-        return [];
-      }
-
-      const formatted = posts.map(post => this.formatThreadsPost(post));
-      logger.info(`✅ Found ${formatted.length} posts from Threads`);
-      return formatted;
-
+      const posts = this.extractPosts(response.data);
+      return posts.map(p => this.formatPost(p, 'threads'));
     } catch (error) {
       this.logApiError('Threads', error);
       return [];
     }
   }
 
-  /**
-   * Extract posts array from various response formats
-   */
-  static extractPostsFromResponse(data, platform) {
-    if (!data) return [];
-
-    // Try common response structures
-    if (Array.isArray(data)) {
-      return data;
-    }
-    if (data.data && Array.isArray(data.data)) {
-      return data.data;
-    }
-    if (data.posts && Array.isArray(data.posts)) {
-      return data.posts;
-    }
-    if (data.results && Array.isArray(data.results)) {
-      return data.results;
-    }
-    if (data.videos && Array.isArray(data.videos)) {
-      return data.videos;
-    }
-    if (data.items && Array.isArray(data.items)) {
-      return data.items;
-    }
-    // Nested data structures
-    if (data.data?.posts && Array.isArray(data.data.posts)) {
-      return data.data.posts;
-    }
-    if (data.data?.results && Array.isArray(data.data.results)) {
-      return data.data.results;
-    }
-    if (data.data?.videos && Array.isArray(data.data.videos)) {
-      return data.data.videos;
-    }
-    if (data.data?.items && Array.isArray(data.data.items)) {
-      return data.data.items;
-    }
-
-    logger.warn(`Could not extract posts from ${platform} response. Structure:`, Object.keys(data));
-    return [];
-  }
-
-  /**
-   * Log API error with details
-   */
-  static logApiError(platform, error) {
-    if (error.response) {
-      logger.error(`${platform} API error:`, {
-        status: error.response.status,
-        statusText: error.response.statusText,
-        data: JSON.stringify(error.response.data).substring(0, 200)
+  static async searchTikTok(query, maxResults, headers) {
+    try {
+      const response = await axios.get(`${this.baseUrl}/tiktok/search/keyword`, {
+        headers,
+        params: { query, limit: maxResults },
+        timeout: this.timeout
       });
-    } else if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-      logger.error(`${platform} API connection error:`, error.message);
-    } else {
-      logger.error(`${platform} search error:`, error.message);
+      const videos = this.extractPosts(response.data);
+      return videos.map(v => this.formatPost(v, 'tiktok'));
+    } catch (error) {
+      this.logApiError('TikTok', error);
+      return [];
     }
   }
 
-  /**
-   * Format Reddit post to standard structure
-   */
-  static formatRedditPost(post) {
-    // Calculate engagement (sum of interactions)
-    const engagement = (post.score || post.ups || 0) + 
-                      (post.num_comments || post.comments || 0);
+  static async searchInstagram(query, maxResults, headers) {
+    try {
+      const response = await axios.get(`${this.baseUrl}/instagram/reels/search`, {
+        headers,
+        params: { query, limit: maxResults },
+        timeout: this.timeout
+      });
+      const reels = this.extractPosts(response.data);
+      return reels.map(r => this.formatPost(r, 'instagram'));
+    } catch (error) {
+      this.logApiError('Instagram', error);
+      return [];
+    }
+  }
+
+  static async searchPinterest(query, maxResults, headers) {
+    try {
+      const response = await axios.get(`${this.baseUrl}/pinterest/search`, {
+        headers,
+        params: { query, limit: maxResults },
+        timeout: this.timeout
+      });
+      const pins = this.extractPosts(response.data);
+      return pins.map(p => this.formatPost(p, 'pinterest'));
+    } catch (error) {
+      this.logApiError('Pinterest', error);
+      return [];
+    }
+  }
+
+  static async searchGoogle(query, maxResults, headers) {
+    try {
+      const response = await axios.get(`${this.baseUrl}/google/search`, {
+        headers,
+        params: { query, limit: maxResults },
+        timeout: this.timeout
+      });
+      const results = this.extractPosts(response.data);
+      return results.map(r => this.formatPost(r, 'google'));
+    } catch (error) {
+      this.logApiError('Google', error);
+      return [];
+    }
+  }
+
+  // --- Ad Search Methods ---
+
+  static async searchFacebookAds(query, maxResults, headers) {
+    try {
+      const response = await axios.get(`${this.baseUrl}/facebook/adLibrary/search/ads`, {
+        headers,
+        params: { query, limit: maxResults },
+        timeout: this.timeout
+      });
+      const ads = this.extractPosts(response.data);
+      return ads.map(ad => this.formatAd(ad, 'facebook'));
+    } catch (error) {
+      this.logApiError('Facebook Ads', error);
+      return [];
+    }
+  }
+
+  static async searchLinkedInAds(query, maxResults, headers) {
+    try {
+      const response = await axios.get(`${this.baseUrl}/linkedin/ads/search`, {
+        headers,
+        params: { query, limit: maxResults },
+        timeout: this.timeout
+      });
+      const ads = this.extractPosts(response.data);
+      return ads.map(ad => this.formatAd(ad, 'linkedin'));
+    } catch (error) {
+      this.logApiError('LinkedIn Ads', error);
+      return [];
+    }
+  }
+
+  static async searchGoogleAds(query, maxResults, headers) {
+    try {
+      const response = await axios.get(`${this.baseUrl}/google/adLibrary/advertisers/search`, {
+        headers,
+        params: { query, limit: maxResults },
+        timeout: this.timeout
+      });
+      const ads = this.extractPosts(response.data);
+      return ads.map(ad => this.formatAd(ad, 'google'));
+    } catch (error) {
+      this.logApiError('Google Ads', error);
+      return [];
+    }
+  }
+
+  // --- Helpers ---
+
+  static extractPosts(data) {
+    if (!data) return [];
+    if (Array.isArray(data)) return data;
+    return data.data?.posts || data.data?.videos || data.data?.items || 
+           data.data?.results || data.posts || data.videos || data.results || [];
+  }
+
+  static logApiError(platform, error) {
+    logger.error(`${platform} search error:`, error.message);
+  }
+
+  static formatPost(item, platform) {
+    // Generic formatter for all platforms
+    const engagement = (item.likes || item.like_count || 0) + 
+                      (item.comments || item.comment_count || 0) + 
+                      (item.shares || item.share_count || 0) +
+                      (item.views || item.view_count || 0) * 0.01;
 
     return {
-      id: post.id || post.name || `reddit_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      content: post.title || post.text || post.selftext || post.body || '',
-      source: post.subreddit ? `r/${post.subreddit}` : (post.subreddit_name_prefixed || 'Reddit'),
+      id: item.id || item.post_id || item.video_id || `${platform}_${Date.now()}_${Math.random()}`,
+      content: item.title || item.text || item.content || item.description || item.caption || '',
+      source: item.author || item.username || item.channel || item.subreddit || platform,
       engagement: Math.round(engagement),
-      timestamp: post.created_utc 
-        ? new Date(post.created_utc * 1000).toISOString() 
-        : (post.created || post.timestamp || new Date().toISOString()),
-      url: post.url || post.permalink || (post.id ? `https://reddit.com/comments/${post.id}` : '#'),
-      author: post.author || post.author_name || 'Unknown'
+      timestamp: item.created_at || item.published_at || item.timestamp || new Date().toISOString(),
+      url: item.url || item.permalink || item.post_url || '#',
+      author: item.author || item.username || 'Unknown',
+      platform: platform,
+      thumbnail: item.thumbnail || item.cover_image || item.image_url || ''
     };
   }
 
-  /**
-   * Format YouTube video to standard structure
-   */
-  static formatYouTubePost(video) {
-    // Calculate engagement
-    const views = parseInt(video.viewCount || video.views || video.view_count || 0);
-    const likes = parseInt(video.likeCount || video.likes || video.like_count || 0);
-    const comments = parseInt(video.commentCount || video.comments || video.comment_count || 0);
-    const engagement = views * 0.01 + likes + comments; // Weight views less
-
-    const videoId = video.id || video.videoId || video.video_id;
-
+  static formatAd(ad, platform) {
     return {
-      id: videoId || `youtube_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      content: video.title || video.snippet?.title || video.description || '',
-      source: video.channelTitle || video.channel || video.channel_title || video.author || 'YouTube',
-      engagement: Math.round(engagement),
-      timestamp: video.publishedAt || video.published_at || video.upload_date || new Date().toISOString(),
-      url: video.url || (videoId ? `https://youtube.com/watch?v=${videoId}` : '#'),
-      author: video.channelTitle || video.channel || video.channel_title || video.author || 'Unknown'
-    };
-  }
-
-  /**
-   * Format Threads post to standard structure
-   */
-  static formatThreadsPost(post) {
-    // Calculate engagement
-    const engagement = (post.likes || post.like_count || 0) + 
-                      (post.replies || post.comments || post.reply_count || 0) + 
-                      (post.reposts || post.repost_count || post.shares || 0);
-
-    return {
-      id: post.id || post.post_id || `threads_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      content: post.text || post.content || post.caption || post.body || '',
-      source: post.username ? `@${post.username}` : (post.author || 'Threads'),
-      engagement: Math.round(engagement),
-      timestamp: post.created_at || post.timestamp || post.posted_at || new Date().toISOString(),
-      url: post.url || post.permalink || post.post_url || '#',
-      author: post.username || post.author || post.user || 'Unknown'
+      id: ad.id || `${platform}_ad_${Date.now()}`,
+      content: ad.ad_creative_body || ad.title || ad.description || '',
+      source: ad.page_name || ad.advertiser_name || platform,
+      engagement: 0, // Ads usually don't show engagement publicly
+      timestamp: ad.start_date || new Date().toISOString(),
+      url: ad.ad_snapshot_url || ad.url || '#',
+      author: ad.page_name || ad.advertiser_name || 'Unknown',
+      platform: platform,
+      type: 'ad',
+      thumbnail: ad.image_url || ad.thumbnail || ''
     };
   }
 }
