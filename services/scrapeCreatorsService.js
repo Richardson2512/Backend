@@ -53,7 +53,7 @@ class ScrapeCreatorsService {
   /**
    * Search Ads across platforms
    */
-  static async searchAds(query, platforms = ['facebook', 'linkedin', 'google'], maxResults = 20) {
+  static async searchAds(query, platforms = ['facebook', 'linkedin', 'google', 'reddit', 'tiktok_shop'], maxResults = 20) {
     const startTime = Date.now();
     logger.info(`🔍 Searching Ads for: "${query}" on: ${platforms.join(', ')}`);
 
@@ -72,6 +72,12 @@ class ScrapeCreatorsService {
             break;
           case 'google':
             ads = await this.searchGoogleAds(query, maxResults, headers);
+            break;
+          case 'reddit':
+            ads = await this.searchRedditAds(query, maxResults, headers);
+            break;
+          case 'tiktok_shop':
+            ads = await this.searchTikTokShop(query, maxResults, headers);
             break;
         }
         return ads.map(ad => ({ ...ad, platform, type: 'ad' }));
@@ -269,13 +275,44 @@ class ScrapeCreatorsService {
     }
   }
 
+  static async searchRedditAds(query, maxResults, headers) {
+    try {
+      const response = await axios.get(`${this.baseUrl}/reddit/ads/search`, {
+        headers,
+        params: { query, limit: maxResults },
+        timeout: this.timeout
+      });
+      const ads = this.extractPosts(response.data);
+      return ads.map(ad => this.formatAd(ad, 'reddit'));
+    } catch (error) {
+      this.logApiError('Reddit Ads', error);
+      return [];
+    }
+  }
+
+  static async searchTikTokShop(query, maxResults, headers) {
+    try {
+      const response = await axios.get(`${this.baseUrl}/tiktok/shop/search`, {
+        headers,
+        params: { query, limit: maxResults },
+        timeout: this.timeout
+      });
+      const items = this.extractPosts(response.data);
+      return items.map(item => this.formatAd(item, 'tiktok_shop'));
+    } catch (error) {
+      this.logApiError('TikTok Shop', error);
+      return [];
+    }
+  }
+
   // --- Helpers ---
 
   static extractPosts(data) {
     if (!data) return [];
     if (Array.isArray(data)) return data;
     return data.data?.posts || data.data?.videos || data.data?.items || 
-           data.data?.results || data.posts || data.videos || data.results || [];
+           data.data?.results || data.data?.ads || data.posts || data.videos || 
+           data.results || data.items || data.ads || [];
   }
 
   static logApiError(platform, error) {
@@ -283,7 +320,6 @@ class ScrapeCreatorsService {
   }
 
   static formatPost(item, platform) {
-    // Generic formatter for all platforms
     const engagement = (item.likes || item.like_count || 0) + 
                       (item.comments || item.comment_count || 0) + 
                       (item.shares || item.share_count || 0) +
@@ -304,16 +340,16 @@ class ScrapeCreatorsService {
 
   static formatAd(ad, platform) {
     return {
-      id: ad.id || `${platform}_ad_${Date.now()}`,
-      content: ad.ad_creative_body || ad.title || ad.description || '',
-      source: ad.page_name || ad.advertiser_name || platform,
-      engagement: 0, // Ads usually don't show engagement publicly
+      id: ad.id || `${platform}_ad_${Date.now()}_${Math.random()}`,
+      content: ad.ad_creative_body || ad.title || ad.description || ad.product_name || '',
+      source: ad.page_name || ad.advertiser_name || ad.shop_name || platform,
+      engagement: ad.sold_count || 0, // For TikTok Shop
       timestamp: ad.start_date || new Date().toISOString(),
-      url: ad.ad_snapshot_url || ad.url || '#',
-      author: ad.page_name || ad.advertiser_name || 'Unknown',
+      url: ad.ad_snapshot_url || ad.url || ad.product_url || '#',
+      author: ad.page_name || ad.advertiser_name || ad.shop_name || 'Unknown',
       platform: platform,
       type: 'ad',
-      thumbnail: ad.image_url || ad.thumbnail || ''
+      thumbnail: ad.image_url || ad.thumbnail || ad.product_image || ''
     };
   }
 }
