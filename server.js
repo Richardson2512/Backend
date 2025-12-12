@@ -11,6 +11,7 @@ const searchRoutes = require('./routes/search');
 const ratingRoutes = require('./routes/ratings');
 const scriptGenerationRoutes = require('./routes/scriptGeneration');
 const paymentRoutes = require('./routes/payments');
+const supportRoutes = require('./routes/support');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -83,6 +84,7 @@ app.use('/api/search', searchRoutes);
 app.use('/api/ratings', ratingRoutes);
 app.use('/api/scripts', scriptGenerationRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/support', supportRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
