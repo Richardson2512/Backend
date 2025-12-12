@@ -87,11 +87,59 @@ router.post('/contact', upload.array('screenshots', 5), async (req, res) => {
       screenshots.length > 0 ? `Screenshots attached: ${screenshots.length}` : 'No screenshots attached.',
     ].join('\n');
 
-    const attachments = screenshots.map((file, idx) => ({
-      filename: file.originalname || `screenshot-${idx + 1}.png`,
-      content: file.buffer,
-      contentType: file.mimetype,
-    }));
+    // Build inline (CID) attachments so screenshots render inside the email body
+    const cidAttachments = screenshots.map((file, idx) => {
+      const cid = `screenshot-${idx + 1}@insightsnap`;
+      return {
+        filename: file.originalname || `screenshot-${idx + 1}.png`,
+        content: file.buffer,
+        contentType: file.mimetype,
+        cid,
+        contentDisposition: 'inline',
+      };
+    });
+
+    // Escape message for safe HTML rendering
+    const escapeHtml = (str) =>
+      String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
+    const htmlScreenshotsSection =
+      cidAttachments.length > 0
+        ? `
+          <h3 style="margin:16px 0 8px;">Screenshots</h3>
+          ${cidAttachments
+            .map(
+              (att, i) => `
+                <div style="margin:10px 0;">
+                  <div style="font-size:12px;color:#555;margin-bottom:6px;">
+                    ${i + 1}. ${escapeHtml(att.filename)}
+                  </div>
+                  <img src="cid:${att.cid}" alt="${escapeHtml(att.filename)}"
+                       style="max-width:100%;border:1px solid #e5e7eb;border-radius:8px;" />
+                </div>`
+            )
+            .join('')}
+        `
+        : `<p><em>No screenshots attached.</em></p>`;
+
+    const htmlBody = `
+      <div style="font-family:Arial,sans-serif;color:#111;">
+        <p><strong>Type:</strong> ${escapeHtml(type)}</p>
+        <p><strong>Name:</strong> ${escapeHtml(name)}</p>
+        <p><strong>Email:</strong> ${escapeHtml(email)}</p>
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0;" />
+        <h3 style="margin:0 0 8px;">Message</h3>
+        <pre style="white-space:pre-wrap;background:#f9fafb;border:1px solid #e5e7eb;padding:12px;border-radius:8px;">${escapeHtml(
+          message
+        )}</pre>
+        ${htmlScreenshotsSection}
+      </div>
+    `;
 
     await transport.sendMail({
       from,
@@ -99,7 +147,8 @@ router.post('/contact', upload.array('screenshots', 5), async (req, res) => {
       replyTo: email,
       subject,
       text: textBody,
-      attachments,
+      html: htmlBody,
+      attachments: cidAttachments,
     });
 
     logger.info('✅ Support message sent', {
