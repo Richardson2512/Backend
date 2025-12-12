@@ -13,6 +13,7 @@ SET search_path = public
 AS $$
 DECLARE
   v_total_searches bigint;
+  v_keywords_baseline bigint := 20000;
   v_searches_today bigint;
   v_total_auth_users bigint;
   v_top_keywords jsonb;
@@ -55,7 +56,8 @@ BEGIN
   ) t;
 
   RETURN jsonb_build_object(
-    'totalSearches', COALESCE(v_total_searches, 0),
+    -- Display baseline + real count so the counter starts at 20k and continues incrementing
+    'totalSearches', COALESCE(v_total_searches, 0) + v_keywords_baseline,
     'searchesToday', COALESCE(v_searches_today, 0),
     'totalAuthUsers', COALESCE(v_total_auth_users, 0),
     'topKeywords', COALESCE(v_top_keywords, '[]'::jsonb)
